@@ -1,10 +1,21 @@
 "use client";
 
+import Image from "next/image";
 import { FormEvent, useMemo, useState } from "react";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { LoadingMessage } from "@/components/chat/LoadingMessage";
 import { SourceList } from "@/components/chat/SourceList";
+import {
+  advanceDemoCase,
+  DemoRequestError,
+  loadDemoCase,
+} from "@/lib/univ-agent/demo-client";
+import type {
+  DemoAction,
+  DemoCase,
+  DemoStage,
+} from "@/lib/univ-agent/demo-case";
 import type {
   AnswerPayload,
   AnswerResult,
@@ -31,7 +42,20 @@ const officialQuestion =
   "전 학기 3.5 이상인 군복학생인데 이번 학기 최대 몇 학점까지 신청할 수 있나요?";
 
 const privateQuestion = "KLAS에는 21학점으로 표시돼요";
-const collectiveQuestion = "필수과목 정원이 이미 찼어요";
+
+const uiStageByDemoStage: Record<DemoStage, StageId> = {
+  home: "ask",
+  ask: "ask",
+  thinking: "thinking",
+  official_answer: "official",
+  official_followup_prefill: "private-prefill",
+  private_verification: "private-verification",
+  private_receipt: "private-receipt",
+  collective_followup_prefill: "collective-prefill",
+  collective_issue: "collective-issue",
+  decision_and_execution: "decision",
+  final_timetable: "final",
+};
 
 class AnswerRequestError extends Error {}
 
@@ -283,6 +307,10 @@ export default function Home() {
   const [submittedQuestion, setSubmittedQuestion] = useState(officialQuestion);
   const [answerResult, setAnswerResult] = useState<AnswerResult | null>(null);
   const [answerError, setAnswerError] = useState<string | null>(null);
+  const [demoCase, setDemoCase] = useState<DemoCase | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isTransitioning, setIsTransitioning] = useState(false);
+  const [transitionError, setTransitionError] = useState<string | null>(null);
 
   const meta = stageMeta[stage];
   const stageIndex =
@@ -296,40 +324,119 @@ export default function Home() {
     if (stageIndex >= 1) base.push("공식 근거 확인");
     if (stageIndex >= 2) base.push("공식 답변");
     if (stageIndex >= 4) base.push("개인 확인 요청");
-    if (stageIndex >= 5) base.push("PRI-24116 영수증");
-    if (stageIndex >= 7) base.push("COL-0088 집단 사안");
+    if (stageIndex >= 5) base.push(`${demoCase?.receipts.private ?? "PRI-24116"} 영수증`);
+    if (stageIndex >= 7) base.push(`${demoCase?.receipts.collective ?? "COL-0088"} 집단 사안`);
     if (stageIndex >= 8) base.push("학교 결정 · KLAS 실행");
     if (stageIndex >= 9) base.push("목표 완료");
 
     return base;
-  }, [stageIndex]);
+  }, [demoCase, stageIndex]);
 
-  function goTo(nextStage: StageId) {
-    if (nextStage === "private-prefill") setInput(privateQuestion);
-    if (nextStage === "collective-prefill") setInput(collectiveQuestion);
-    setStage(nextStage);
+  function applyDemoCase(nextCase: DemoCase) {
+    setDemoCase(nextCase);
+    setStage(uiStageByDemoStage[nextCase.currentStage]);
+
+    if (nextCase.currentStage === "official_followup_prefill") {
+      setInput(nextCase.followUps.personal);
+    }
+
+    if (nextCase.currentStage === "collective_followup_prefill") {
+      setInput(nextCase.followUps.collective);
+    }
+  }
+
+  function readRequestError(error: unknown) {
+    if (error instanceof DemoRequestError) {
+      return error.message;
+    }
+
+    if (
+      error instanceof Error &&
+      (error.name === "TimeoutError" || error.name === "AbortError")
+    ) {
+      return "데모 상태 확인 시간이 초과됐습니다. 잠시 후 다시 시도해 주세요.";
+    }
+
+    return "데모 서버와 연결할 수 없습니다. 연결 상태를 확인해 주세요.";
+  }
+
+  async function startDemo() {
+    if (isStarting) {
+      return;
+    }
+
+    setIsStarting(true);
+    setTransitionError(null);
+
+    try {
+      const initialCase = await loadDemoCase();
+      const askCase = await advanceDemoCase(initialCase.currentStage, "START_DEMO");
+      setInput(askCase.question);
+      setSubmittedQuestion(askCase.question);
+      applyDemoCase(askCase);
+      setStarted(true);
+    } catch (error) {
+      setTransitionError(readRequestError(error));
+    } finally {
+      setIsStarting(false);
+    }
+  }
+
+  async function moveDemo(action: DemoAction) {
+    if (!demoCase || isTransitioning) {
+      return;
+    }
+
+    setIsTransitioning(true);
+    setTransitionError(null);
+
+    try {
+      const nextCase = await advanceDemoCase(demoCase.currentStage, action);
+      applyDemoCase(nextCase);
+    } catch (error) {
+      setTransitionError(readRequestError(error));
+    } finally {
+      setIsTransitioning(false);
+    }
   }
 
   async function requestOfficialAnswer(question: string) {
     const normalizedQuestion = question.trim();
 
-    if (!normalizedQuestion || stage === "thinking") {
+    if (!normalizedQuestion || isTransitioning) {
       return;
     }
 
     setSubmittedQuestion(normalizedQuestion);
     setAnswerResult(null);
     setAnswerError(null);
-    setStage("thinking");
+    setIsTransitioning(true);
+    setTransitionError(null);
 
     try {
+      if (!demoCase) {
+        throw new AnswerRequestError("데모 질문 상태를 확인하지 못했습니다.");
+      }
+
+      let activeCase = demoCase;
+
+      if (activeCase.currentStage === "ask") {
+        activeCase = await advanceDemoCase(
+          activeCase.currentStage,
+          "SUBMIT_QUESTION",
+        );
+        applyDemoCase(activeCase);
+      } else if (activeCase.currentStage !== "thinking") {
+        throw new AnswerRequestError("현재 단계에서는 공식 답을 다시 요청할 수 없습니다.");
+      }
+
       const [response] = await Promise.all([
         fetch("/api/answers", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             question: normalizedQuestion,
-            conditions: ["직전 학기 평점 3.5 이상", "군 복학 예정"],
+            conditions: activeCase.conditions,
           }),
           signal: AbortSignal.timeout(25_000),
         }),
@@ -349,21 +456,30 @@ export default function Home() {
       }
 
       setAnswerResult(payload);
-      setStage(
-        payload.data.status === "insufficient_evidence"
-          ? "no-evidence"
-          : "official",
-      );
+
+      if (payload.data.status === "insufficient_evidence") {
+        setStage("no-evidence");
+      } else {
+        const officialCase = await advanceDemoCase(
+          activeCase.currentStage,
+          "RESOLVE_OFFICIAL_ANSWER",
+        );
+        applyDemoCase(officialCase);
+      }
     } catch (error) {
       setAnswerError(
         error instanceof AnswerRequestError
           ? error.message
+          : error instanceof DemoRequestError
+            ? error.message
           : error instanceof Error &&
               (error.name === "TimeoutError" || error.name === "AbortError")
           ? "답변 확인 시간이 초과됐습니다. 잠시 후 다시 시도해 주세요."
           : "서버와 연결할 수 없습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.",
       );
       setStage("answer-error");
+    } finally {
+      setIsTransitioning(false);
     }
   }
 
@@ -383,17 +499,23 @@ export default function Home() {
     setSubmittedQuestion(value);
 
     if (stage === "private-prefill") {
-      setStage("private-verification");
+      void moveDemo("SUBMIT_PRIVATE_FOLLOWUP");
       return;
     }
 
     if (stage === "collective-prefill") {
-      setStage("collective-issue");
+      void moveDemo("SUBMIT_COLLECTIVE_FOLLOWUP");
     }
   }
 
   if (!started) {
-    return <Landing onStart={() => setStarted(true)} />;
+    return (
+      <Landing
+        error={transitionError}
+        isStarting={isStarting}
+        onStart={() => void startDemo()}
+      />
+    );
   }
 
   return (
@@ -406,7 +528,7 @@ export default function Home() {
             <div>
               <h1 className="text-2xl font-bold leading-8">22학점 시간표 확정</h1>
               <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                수강신청 · 오늘 · CONV-0832
+                수강신청 · 오늘 · {demoCase?.caseId ?? "CONV-0832"}
               </p>
             </div>
             <div className="hidden items-center gap-3 md:flex">
@@ -416,15 +538,29 @@ export default function Home() {
           </header>
 
           <section className="flex-1 overflow-y-auto px-5 py-6 pb-36 sm:px-10">
-            <ChatMessage role="user" content={submittedQuestion} meta="김민준 · 14:04" />
+            <ChatMessage
+              role="user"
+              content={submittedQuestion}
+              meta={`${demoCase?.student.name ?? "김민준"} · 14:04`}
+            />
+            {transitionError ? (
+              <div
+                className="mb-5 max-w-[820px] rounded-xl bg-[var(--status-error-bg)] p-4 text-sm font-medium text-[var(--status-error)]"
+                role="alert"
+              >
+                {transitionError}
+              </div>
+            ) : null}
             <StageContent
               input={input}
               setInput={setInput}
               stage={stage}
+              demoCase={demoCase}
+              isTransitioning={isTransitioning}
               submittedQuestion={submittedQuestion}
               answerResult={answerResult}
               answerError={answerError}
-              goTo={goTo}
+              onAdvance={(action) => void moveDemo(action)}
               onRequestOfficialAnswer={() => void requestOfficialAnswer(input)}
               onRetry={() => void requestOfficialAnswer(submittedQuestion)}
             />
@@ -440,7 +576,7 @@ export default function Home() {
                     ? "답변을 준비하는 동안 잠시만 기다려주세요"
                     : "이어서 질문해보세요"
                 }
-                disabled={stage === "thinking" || stage === "official" || stage === "private-receipt" || stage === "decision"}
+                disabled={isTransitioning || stage === "thinking" || stage === "official" || stage === "private-receipt" || stage === "decision"}
                 submitLabel={
                   stage === "thinking"
                     ? "확인 중"
@@ -455,7 +591,7 @@ export default function Home() {
           ) : null}
         </main>
 
-        <ResponsibilityRail meta={meta} records={records} />
+        <ResponsibilityRail demoCase={demoCase} meta={meta} records={records} />
       </div>
     </div>
   );
@@ -468,7 +604,9 @@ function StageContent({
   submittedQuestion,
   answerResult,
   answerError,
-  goTo,
+  demoCase,
+  isTransitioning,
+  onAdvance,
   onRequestOfficialAnswer,
   onRetry,
 }: {
@@ -478,7 +616,9 @@ function StageContent({
   submittedQuestion: string;
   answerResult: AnswerResult | null;
   answerError: string | null;
-  goTo: (stage: StageId) => void;
+  demoCase: DemoCase | null;
+  isTransitioning: boolean;
+  onAdvance: (action: DemoAction) => void;
   onRequestOfficialAnswer: () => void;
   onRetry: () => void;
 }) {
@@ -492,8 +632,11 @@ function StageContent({
             학점 상한은 성적과 복학 상태에 따라 달라질 수 있어요. 아래 조건이 맞는지 확인한 뒤 공식 근거 검색을 시작합니다.
           </p>
           <div className="mt-5 flex flex-wrap gap-3">
-            <StaticChip>평점 3.5 이상</StaticChip>
-            <StaticChip>군 복학 예정</StaticChip>
+            {(demoCase?.conditions ?? ["평점 3.5 이상", "군 복학 예정"])
+              .slice(0, 2)
+              .map((condition) => (
+                <StaticChip key={condition}>{condition}</StaticChip>
+              ))}
           </div>
           <div className="mt-6 rounded-xl bg-white p-4">
             <p className="text-sm font-bold">이 단계에서는 학번이나 성적표 원문을 보내지 않아요.</p>
@@ -504,10 +647,10 @@ function StageContent({
         </article>
         <button
           className="btn-primary mt-7 h-12 px-6"
-          disabled={!input.trim()}
+          disabled={!input.trim() || isTransitioning}
           onClick={onRequestOfficialAnswer}
         >
-          공식 근거로 확인하기
+          {isTransitioning ? "확인 중" : "공식 근거로 확인하기"}
         </button>
       </div>
     );
@@ -544,7 +687,9 @@ function StageContent({
             </p>
           ) : null}
           <div className="mt-5 rounded-xl bg-white p-4">
-            <p className="text-sm font-bold">대화 기록 CONV-0832</p>
+            <p className="text-sm font-bold">
+              대화 기록 {demoCase?.caseId ?? "CONV-0832"}
+            </p>
             <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
               {answerResult.data.nextAction}
             </p>
@@ -554,14 +699,13 @@ function StageContent({
           </p>
         </article>
         <div className="mt-6 flex flex-wrap gap-3">
-          <button className="chip" type="button" onClick={() => goTo("private-prefill")}>
-            KLAS에는 21학점으로 표시돼요
-          </button>
-          <button className="chip chip-muted" type="button" onClick={() => setInput("22학점 시간표에서 먼저 신청할 과목은?")}>
-            22학점 시간표에서 먼저 신청할 과목은?
-          </button>
-          <button className="chip chip-muted" type="button" onClick={() => goTo("collective-prefill")}>
-            필수과목 정원이 이미 찼어요
+          <button
+            className="chip"
+            disabled={isTransitioning}
+            type="button"
+            onClick={() => onAdvance("PREFILL_PRIVATE_FOLLOWUP")}
+          >
+            {demoCase?.followUps.personal ?? privateQuestion}
           </button>
         </div>
       </div>
@@ -575,8 +719,9 @@ function StageContent({
         title="개인 조건이 포함된 후속 질문을 확인해 주세요"
         body="공식 답과 KLAS 표시가 다른 문제는 개인 상태 확인이 필요한 별도 사안입니다."
         value={input}
+        busy={isTransitioning}
         onChange={setInput}
-        onSubmit={() => goTo("private-verification")}
+        onSubmit={() => onAdvance("SUBMIT_PRIVATE_FOLLOWUP")}
       />
     );
   }
@@ -590,7 +735,8 @@ function StageContent({
         body="이 화면은 실제 부서로 요청을 보내지 않습니다. 해커톤 데모를 위해 처리 주체, 상태, 다음 행동을 일관된 기록으로 보여줍니다."
         facts={["현재 공식 답: 최대 22학점", "현재 KLAS 표시: 21학점", "확인 담당: 교육지원팀"]}
         actionLabel="개인 확인 요청 만들기"
-        onAction={() => goTo("private-receipt")}
+        busy={isTransitioning}
+        onAction={() => onAdvance("CREATE_PRIVATE_REQUEST")}
       />
     );
   }
@@ -599,16 +745,15 @@ function StageContent({
     return (
       <ReceiptPanel
         title="개인 상태 정정 영수증"
-        receipt="PRI-24116"
+        receipt={demoCase?.receipts.private ?? "PRI-24116"}
         tone="personal"
-        rows={[
-          ["14:06", "개인 확인 요청 생성", "데모 상태"],
-          ["14:08", "군 복학 적용 조건 확인", "교육지원팀"],
-          ["14:10", "KLAS 표시 정정 결과 기록", "21학점 → 22학점"],
-        ]}
+        rows={(demoCase?.receipts.privateTimeline ?? []).map(
+          ({ time, event, owner }) => [time, event, owner],
+        )}
         note="실제 KLAS에 반영된 결과가 아니라 데모 기록입니다."
         actionLabel="같은 문제를 겪는 학생 수요 확인"
-        onAction={() => goTo("collective-prefill")}
+        busy={isTransitioning}
+        onAction={() => onAdvance("PREFILL_COLLECTIVE_FOLLOWUP")}
       />
     );
   }
@@ -620,8 +765,9 @@ function StageContent({
         title="집단 문제로 전환할 질문을 확인해 주세요"
         body="필수과목 정원 부족은 개인 학적 정정과 다른 책임 수준입니다."
         value={input}
+        busy={isTransitioning}
         onChange={setInput}
-        onSubmit={() => goTo("collective-issue")}
+        onSubmit={() => onAdvance("SUBMIT_COLLECTIVE_FOLLOWUP")}
       />
     );
   }
@@ -633,9 +779,14 @@ function StageContent({
         eyebrow="집단 사안 · 데모 대표성"
         title="같은 문제를 겪는 인증된 수요가 모였어요"
         body="학생회 검토와 학교 판단은 실제 외부 시스템 연동 없이 데모 데이터로 표시합니다."
-        facts={["47명 같은 문제", "23명 동일 필수과목 수요", "100% 학교 인증 상태"]}
+        facts={[
+          `${demoCase?.demand.sameIssue ?? 47}명 같은 문제`,
+          `${demoCase?.demand.sameRequiredCourse ?? 23}명 동일 필수과목 수요`,
+          `${demoCase?.demand.schoolVerificationRate ?? 100}% 학교 인증 상태`,
+        ]}
         actionLabel="집단 사안으로 전환"
-        onAction={() => goTo("decision")}
+        busy={isTransitioning}
+        onAction={() => onAdvance("ESCALATE_COLLECTIVE_ISSUE")}
       />
     );
   }
@@ -647,17 +798,30 @@ function StageContent({
         eyebrow="학교 결정과 KLAS 실행 · 데모"
         title="필수과목 분반 증설 결정과 KLAS 정원 반영을 분리해 기록했어요"
         body="결정문이 있다는 사실과 KLAS 실행 반영은 서로 다른 상태입니다. 이 화면은 데모 실행 기록을 보여줍니다."
-        facts={["학교 결정: 필수과목 1개 분반 증설", "KLAS 실행: 정원 반영 완료로 표시", "사안 기록: COL-0088"]}
+        facts={[
+          `학교 결정: ${demoCase?.decision.summary ?? "필수과목 분반 증설"}`,
+          `${demoCase?.execution.system ?? "KLAS"} 실행: ${demoCase?.execution.summary ?? "정원 반영 완료로 표시"}`,
+          `사안 기록: ${demoCase?.receipts.collective ?? "COL-0088"}`,
+        ]}
         actionLabel="확정된 시간표 보기"
-        onAction={() => goTo("final")}
+        busy={isTransitioning}
+        onAction={() => onAdvance("VIEW_FINAL_TIMETABLE")}
       />
     );
   }
 
-  return <FinalTimetable />;
+  return <FinalTimetable demoCase={demoCase} />;
 }
 
-function Landing({ onStart }: { onStart: () => void }) {
+function Landing({
+  error,
+  isStarting,
+  onStart,
+}: {
+  error: string | null;
+  isStarting: boolean;
+  onStart: () => void;
+}) {
   return (
     <main className="min-h-screen bg-[var(--surface-panel)] text-[var(--text-primary)]">
       <div className="bg-[var(--action-primary)] px-6 py-3 text-center text-sm font-medium text-white">
@@ -668,8 +832,12 @@ function Landing({ onStart }: { onStart: () => void }) {
           <span className="text-[22px] font-bold">학교생활</span>
           <span className="text-xs font-medium text-[var(--text-secondary)]">대학 행정 대화</span>
         </div>
-        <button className="btn-primary h-[54px] px-5" onClick={onStart}>
-          로그인하기
+        <button
+          className="btn-primary h-[54px] px-5"
+          disabled={isStarting}
+          onClick={onStart}
+        >
+          {isStarting ? "연결 중" : "로그인하기"}
         </button>
       </nav>
 
@@ -687,8 +855,12 @@ function Landing({ onStart }: { onStart: () => void }) {
             공식 문서의 답부터 내 조건의 확정, 함께 겪는 문제의 결정과 실행까지. 대학 행정의 답을 하나의 이슈 기록으로 연결합니다.
           </p>
           <div className="mt-10 flex flex-wrap gap-3">
-            <button className="btn-primary h-[54px] px-8" onClick={onStart}>
-              로그인하기
+            <button
+              className="btn-primary h-[54px] px-8"
+              disabled={isStarting}
+              onClick={onStart}
+            >
+              {isStarting ? "데모 상태 연결 중" : "로그인하기"}
             </button>
             <button
               className="btn-secondary h-[54px] px-8"
@@ -700,6 +872,14 @@ function Landing({ onStart }: { onStart: () => void }) {
           <p className="mt-5 text-sm font-medium text-[var(--text-secondary)]">
             합성된 데모 계정으로 진입하며 실제 광운대학교 SSO는 사용하지 않습니다.
           </p>
+          {error ? (
+            <p
+              className="mt-4 rounded-xl bg-[var(--status-error-bg)] p-4 text-sm font-medium text-[var(--status-error)]"
+              role="alert"
+            >
+              {error}
+            </p>
+          ) : null}
         </div>
 
         <div className="preview-card animate-enter">
@@ -843,6 +1023,7 @@ function PrefillPanel({
   title,
   body,
   value,
+  busy,
   onChange,
   onSubmit,
 }: {
@@ -850,6 +1031,7 @@ function PrefillPanel({
   title: string;
   body: string;
   value: string;
+  busy: boolean;
   onChange: (value: string) => void;
   onSubmit: () => void;
 }) {
@@ -865,10 +1047,11 @@ function PrefillPanel({
         id="prefill-question"
         className="mt-3 min-h-24 w-full resize-none rounded-xl border border-[var(--border-default)] bg-white p-4 text-base leading-7 outline-none focus:ring-2 focus:ring-[var(--action-primary)]"
         value={value}
+        disabled={busy}
         onChange={(event) => onChange(event.target.value)}
       />
-      <button className="btn-primary mt-5 h-12 px-6" onClick={onSubmit} disabled={!value.trim()}>
-        전송하기
+      <button className="btn-primary mt-5 h-12 px-6" onClick={onSubmit} disabled={!value.trim() || busy}>
+        {busy ? "전송 중" : "전송하기"}
       </button>
     </article>
   );
@@ -881,6 +1064,7 @@ function IssuePanel({
   body,
   facts,
   actionLabel,
+  busy,
   onAction,
 }: {
   tone: StageTone;
@@ -889,6 +1073,7 @@ function IssuePanel({
   body: string;
   facts: string[];
   actionLabel: string;
+  busy: boolean;
   onAction: () => void;
 }) {
   return (
@@ -905,8 +1090,8 @@ function IssuePanel({
         ))}
       </div>
       <DemoNotice />
-      <button className="btn-primary mt-6 h-12 px-6" onClick={onAction}>
-        {actionLabel}
+      <button className="btn-primary mt-6 h-12 px-6" disabled={busy} onClick={onAction}>
+        {busy ? "처리 중" : actionLabel}
       </button>
     </article>
   );
@@ -919,6 +1104,7 @@ function ReceiptPanel({
   rows,
   note,
   actionLabel,
+  busy,
   onAction,
 }: {
   title: string;
@@ -927,6 +1113,7 @@ function ReceiptPanel({
   rows: [string, string, string][];
   note: string;
   actionLabel: string;
+  busy: boolean;
   onAction: () => void;
 }) {
   return (
@@ -943,56 +1130,53 @@ function ReceiptPanel({
         ))}
       </div>
       <p className="mt-5 text-sm leading-6 text-[var(--text-secondary)]">{note}</p>
-      <button className="btn-primary mt-6 h-12 px-6" onClick={onAction}>
-        {actionLabel}
+      <button className="btn-primary mt-6 h-12 px-6" disabled={busy} onClick={onAction}>
+        {busy ? "처리 중" : actionLabel}
       </button>
     </article>
   );
 }
 
-function FinalTimetable() {
+function FinalTimetable({ demoCase }: { demoCase: DemoCase | null }) {
+  const timetable = demoCase?.timetable;
+  const receipts = demoCase?.receipts;
+
   return (
     <article className="max-w-[936px] animate-enter">
       <p className="text-xs font-bold text-[var(--status-official)]">목표 완료 · 데모 시간표</p>
-      <h2 className="mt-3 text-3xl font-bold leading-10">22학점 시간표가 신청 가능한 상태로 정리됐어요</h2>
-      <div className="mt-6 overflow-hidden rounded-2xl border border-[var(--border-default)] bg-white">
-        <div className="grid grid-cols-6 border-b border-[var(--border-default)] bg-[var(--surface-app)] text-center text-xs font-bold text-[var(--text-secondary)]">
-          {["월", "화", "수", "목", "금", "토"].map((day) => (
-            <div className="p-3" key={day}>{day}</div>
-          ))}
-        </div>
-        <div className="grid min-h-[360px] grid-cols-6 gap-px bg-[var(--border-default)]">
-          {[
-            "자료구조\n3학점",
-            "인공지능수학\n3학점",
-            "필수과목 A\n증설 반영 후 추가됨",
-            "컴퓨터구조\n3학점",
-            "오픈소스SW\n3학점",
-            "",
-            "",
-            "교양세미나\n2학점",
-            "",
-            "알고리즘\n3학점",
-            "전공실습\n3학점",
-            "군 복학 상담\n1학점",
-          ].map((item, index) => (
-            <div
-              className={`min-h-32 bg-white p-3 text-sm leading-6 ${item.includes("증설") ? "ring-2 ring-[var(--status-official)]" : ""}`}
-              key={`${item}-${index}`}
-            >
-              {item ? item.split("\n").map((line) => (
-                <p className={line.includes("증설") ? "mt-2 rounded-full bg-[var(--status-official-bg)] px-2 py-1 text-xs font-bold text-[var(--status-official)]" : "font-bold"} key={line}>
-                  {line}
-                </p>
-              )) : null}
-            </div>
-          ))}
-        </div>
+      <h2 className="mt-3 text-3xl font-bold leading-10">
+        {timetable?.totalCredits ?? 22}학점 시간표가 신청 가능한 상태로 정리됐어요
+      </h2>
+      <div className="relative mt-6 overflow-hidden rounded-2xl bg-white p-6 ring-1 ring-inset ring-[var(--border-default)]">
+        <Image
+          alt={
+            timetable?.image.alt ??
+            "광운대학교 22학점 수강 시간표. 수요일 0교시 정보디자인프로그래밍실습이 증설 반영 후 추가됨."
+          }
+          className="h-auto w-full"
+          height={timetable?.image.height ?? 1199}
+          priority
+          src={timetable?.image.src ?? "/timetable-original.png"}
+          width={timetable?.image.width ?? 2464}
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute left-[41.6667%] top-[11.25%] h-[31.875%] w-[16.7735%] rounded-xl border-2 border-[var(--status-official)]"
+        />
+        <span className="absolute left-[59.188%] top-[12.0833%] flex h-[6.25%] w-[16.0256%] items-center justify-center rounded-full bg-[var(--status-official-bg)] px-2 text-center text-[11px] font-bold leading-4 text-[var(--status-official)]">
+          증설 반영 후 추가됨
+        </span>
       </div>
       <div className="mt-5 grid gap-4 md:grid-cols-3">
-        <SummaryCard title="처리 기록" body="CONV-0832 · PRI-24116 · COL-0088" />
+        <SummaryCard
+          title="처리 기록"
+          body={`${demoCase?.caseId ?? "CONV-0832"} · ${receipts?.private ?? "PRI-24116"} · ${receipts?.collective ?? "COL-0088"}`}
+        />
         <SummaryCard title="현재 담당" body="학생" />
-        <SummaryCard title="다음 행동" body="수강신청 당일 확정된 시간표로 신청" />
+        <SummaryCard
+          title="다음 행동"
+          body={timetable?.nextAction ?? "수강신청 당일 확정된 시간표로 신청"}
+        />
       </div>
       <DemoNotice />
     </article>
@@ -1040,9 +1224,11 @@ function SideNavigation({
 }
 
 function ResponsibilityRail({
+  demoCase,
   meta,
   records,
 }: {
+  demoCase: DemoCase | null;
   meta: (typeof stageMeta)[StageId];
   records: string[];
 }) {
@@ -1050,7 +1236,9 @@ function ResponsibilityRail({
     <aside className="border-t border-[var(--border-default)] bg-white p-6 lg:h-screen lg:w-[336px] lg:shrink-0 lg:border-l lg:border-t-0">
       <h2 className="text-xl font-bold">진행 상황</h2>
       <div className="mt-3">
-        <StatusPill tone={meta.tone}>{meta.label}</StatusPill>
+        <StatusPill tone={meta.tone}>
+          {demoCase?.stage.status ?? meta.label}
+        </StatusPill>
       </div>
       <section className="mt-5 rounded-2xl bg-[var(--surface-app)] p-4">
         <h3 className="text-[15px] font-bold leading-6">{meta.railTitle}</h3>
@@ -1058,6 +1246,11 @@ function ResponsibilityRail({
       </section>
       <RailSection title="현재 담당" headline={meta.owner} body={meta.ownerDetail} />
       <RailSection title="다음 안내" headline={meta.next} body={meta.nextDetail} />
+      {demoCase?.stage.demoNotice ? (
+        <p className="mt-5 rounded-xl bg-[var(--surface-app)] p-3 text-xs leading-5 text-[var(--text-secondary)]">
+          {demoCase.stage.demoNotice}
+        </p>
+      ) : null}
       <section className="mt-7 border-t border-[var(--border-default)] pt-6">
         <p className="text-xs font-medium text-[var(--text-muted)]">이 대화의 기록</p>
         <ol className="mt-5 space-y-5">

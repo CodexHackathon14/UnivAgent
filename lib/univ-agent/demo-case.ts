@@ -60,6 +60,11 @@ const DEMO_CASE_BASE = {
   receipts: {
     private: "PRI-24116",
     collective: "COL-0088",
+    privateTimeline: [
+      { time: "14:06", event: "개인 확인 요청 생성", owner: "데모 상태" },
+      { time: "14:08", event: "군 복학 적용 조건 확인", owner: "교육지원팀" },
+      { time: "14:10", event: "KLAS 표시 정정 결과 기록", owner: "21학점 → 22학점" },
+    ],
   },
   demand: {
     sameIssue: 47,
@@ -79,6 +84,12 @@ const DEMO_CASE_BASE = {
   timetable: {
     totalCredits: 22,
     addedCourse: "정보디자인프로그래밍실습",
+    image: {
+      src: "/timetable-original.png",
+      alt: "광운대학교 22학점 수강 시간표. 수요일 0교시 정보디자인프로그래밍실습이 증설 반영 후 추가됨.",
+      width: 2464,
+      height: 1199,
+    },
     nextAction: "수강신청 당일 확정된 시간표로 신청",
   },
 };
@@ -203,6 +214,8 @@ export function getDemoCase(stage: DemoStage = "home") {
     allowedActions: Object.keys(TRANSITIONS[stage]) as DemoAction[],
   };
 }
+
+export type DemoCase = ReturnType<typeof getDemoCase>;
 
 export function transitionDemoCase(stage: DemoStage, action: DemoAction) {
   const nextStage = TRANSITIONS[stage][action];
