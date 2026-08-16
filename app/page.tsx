@@ -1,15 +1,22 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { LoadingMessage } from "@/components/chat/LoadingMessage";
 import { SourceList } from "@/components/chat/SourceList";
+import type {
+  AnswerPayload,
+  AnswerResult,
+  EvidenceSource,
+} from "@/lib/univ-agent/types";
 
 type StageId =
   | "ask"
   | "thinking"
   | "official"
+  | "no-evidence"
+  | "answer-error"
   | "private-prefill"
   | "private-verification"
   | "private-receipt"
@@ -20,49 +27,85 @@ type StageId =
 
 type StageTone = "idle" | "checking" | "official" | "personal" | "collective";
 
-type Source = {
-  id: string;
-  title: string;
-  url: string;
-  publishedAt: string | null;
-  department: string | null;
-  excerpt: string;
-  location?: string;
-  checkedAt: string;
-};
-
 const officialQuestion =
   "전 학기 3.5 이상인 군복학생인데 이번 학기 최대 몇 학점까지 신청할 수 있나요?";
 
 const privateQuestion = "KLAS에는 21학점으로 표시돼요";
 const collectiveQuestion = "필수과목 정원이 이미 찼어요";
 
-const checkedAt = new Date().toISOString();
+class AnswerRequestError extends Error {}
 
-const sources: Source[] = [
-  {
-    id: "kw-rule-23",
-    title: "광운대학교 학칙 시행세칙 제23조",
-    url: "https://www.kw.ac.kr/ko/life/bachelor_info05.jsp",
-    publishedAt: null,
-    department: "교육지원팀",
-    excerpt:
-      "전 학기 성적과 복학 등 적용 조건에 따라 수강신청 가능 학점이 달라질 수 있다.",
-    location: "학사정보 · 수강신청/강의시간표",
-    checkedAt,
-  },
-  {
-    id: "kw-2026-1-registration",
-    title: "2026학년도 1학기 수강신청 공고",
-    url: "https://oia.kw.ac.kr/campus/notice.php?BoardMode=view&CURRENT_PAGE=1&UID=604",
-    publishedAt: "2026-01-21",
-    department: "국제교류팀",
-    excerpt:
-      "2026학년도 1학기 수강신청 기간, 대상, 변경기간과 수강신청 세부내용을 확인하도록 안내한다.",
-    location: "광운대학교 글로벌전략팀 공지",
-    checkedAt,
-  },
-];
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isEvidenceSource(value: unknown): value is EvidenceSource {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.sourceUrl === "string" &&
+    (typeof value.publishedAt === "string" || value.publishedAt === null) &&
+    (typeof value.updatedAt === "string" || value.updatedAt === null) &&
+    typeof value.effectivePeriod === "string" &&
+    typeof value.department === "string" &&
+    typeof value.location === "string" &&
+    typeof value.excerpt === "string" &&
+    typeof value.verifiedAt === "string"
+  );
+}
+
+function isAnswerResult(value: unknown): value is AnswerResult {
+  if (!isRecord(value) || !isRecord(value.data) || !isRecord(value.meta)) {
+    return false;
+  }
+
+  const { data, meta } = value;
+
+  return (
+    [
+      "answered",
+      "needs_personal_verification",
+      "needs_collective_review",
+      "insufficient_evidence",
+    ].includes(String(data.status)) &&
+    ["official", "personal", "collective"].includes(
+      String(data.responsibility),
+    ) &&
+    typeof data.conclusion === "string" &&
+    typeof data.explanation === "string" &&
+    isStringArray(data.verifiedFacts) &&
+    isStringArray(data.unverifiedFacts) &&
+    typeof data.nextAction === "string" &&
+    Array.isArray(data.sources) &&
+    data.sources.every(isEvidenceSource) &&
+    ["openai", "verified_demo_fallback", "rule_based_routing"].includes(
+      String(meta.generationMode),
+    ) &&
+    (typeof meta.model === "string" || meta.model === null) &&
+    typeof meta.evidenceCount === "number" &&
+    (value.warning === undefined || typeof value.warning === "string")
+  );
+}
+
+function readApiError(value: unknown) {
+  if (
+    isRecord(value) &&
+    isRecord(value.error) &&
+    typeof value.error.message === "string"
+  ) {
+    return value.error.message;
+  }
+
+  return "답변 요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+}
 
 const stageOrder: StageId[] = [
   "ask",
@@ -123,6 +166,28 @@ const stageMeta: Record<
     ownerDetail: "교육지원팀 · 수강신청 안내",
     next: "연계 질문",
     nextDetail: "개인 KLAS 표시가 다르면 확인 요청",
+  },
+  "no-evidence": {
+    label: "공식 근거 없음",
+    nav: "official",
+    tone: "idle",
+    railTitle: "추측하지 않고 확인을 멈췄어요",
+    railBody: "현재 연결된 광운대학교 공식 자료에서 질문에 직접 답하는 근거를 찾지 못했습니다.",
+    owner: "학생",
+    ownerDetail: "질문 범위를 구체화",
+    next: "공식 근거 다시 확인",
+    nextDetail: "질문을 수정한 뒤 다시 시도",
+  },
+  "answer-error": {
+    label: "답변 확인 실패",
+    nav: "chat",
+    tone: "idle",
+    railTitle: "요청을 완료하지 못했어요",
+    railBody: "질문은 유지했습니다. 같은 내용으로 다시 시도할 수 있습니다.",
+    owner: "시스템",
+    ownerDetail: "연결 상태와 서버 응답 확인",
+    next: "다시 시도",
+    nextDetail: "실패한 질문을 그대로 재전송",
   },
   "private-prefill": {
     label: "개인 조건 확인",
@@ -216,21 +281,14 @@ export default function Home() {
   const [stage, setStage] = useState<StageId>("ask");
   const [input, setInput] = useState(officialQuestion);
   const [submittedQuestion, setSubmittedQuestion] = useState(officialQuestion);
+  const [answerResult, setAnswerResult] = useState<AnswerResult | null>(null);
+  const [answerError, setAnswerError] = useState<string | null>(null);
 
   const meta = stageMeta[stage];
-  const stageIndex = stageOrder.indexOf(stage);
-
-  useEffect(() => {
-    if (stage !== "thinking") {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setStage("official");
-    }, 1200);
-
-    return () => window.clearTimeout(timer);
-  }, [stage]);
+  const stageIndex =
+    stage === "no-evidence" || stage === "answer-error"
+      ? stageOrder.indexOf("thinking")
+      : stageOrder.indexOf(stage);
 
   const records = useMemo(() => {
     const base = ["질문 접수"];
@@ -252,6 +310,63 @@ export default function Home() {
     setStage(nextStage);
   }
 
+  async function requestOfficialAnswer(question: string) {
+    const normalizedQuestion = question.trim();
+
+    if (!normalizedQuestion || stage === "thinking") {
+      return;
+    }
+
+    setSubmittedQuestion(normalizedQuestion);
+    setAnswerResult(null);
+    setAnswerError(null);
+    setStage("thinking");
+
+    try {
+      const [response] = await Promise.all([
+        fetch("/api/answers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question: normalizedQuestion,
+            conditions: ["직전 학기 평점 3.5 이상", "군 복학 예정"],
+          }),
+          signal: AbortSignal.timeout(25_000),
+        }),
+        new Promise((resolve) => window.setTimeout(resolve, 450)),
+      ]);
+
+      const payload: unknown = await response.json();
+
+      if (!response.ok) {
+        throw new AnswerRequestError(readApiError(payload));
+      }
+
+      if (!isAnswerResult(payload)) {
+        throw new AnswerRequestError(
+          "답변 형식을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        );
+      }
+
+      setAnswerResult(payload);
+      setStage(
+        payload.data.status === "insufficient_evidence"
+          ? "no-evidence"
+          : "official",
+      );
+    } catch (error) {
+      setAnswerError(
+        error instanceof AnswerRequestError
+          ? error.message
+          : error instanceof Error &&
+              (error.name === "TimeoutError" || error.name === "AbortError")
+          ? "답변 확인 시간이 초과됐습니다. 잠시 후 다시 시도해 주세요."
+          : "서버와 연결할 수 없습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.",
+      );
+      setStage("answer-error");
+    }
+  }
+
   function submit(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
     const value = input.trim();
@@ -260,12 +375,12 @@ export default function Home() {
       return;
     }
 
-    setSubmittedQuestion(value);
-
-    if (stage === "ask") {
-      setStage("thinking");
+    if (stage === "ask" || stage === "no-evidence" || stage === "answer-error") {
+      void requestOfficialAnswer(value);
       return;
     }
+
+    setSubmittedQuestion(value);
 
     if (stage === "private-prefill") {
       setStage("private-verification");
@@ -307,7 +422,11 @@ export default function Home() {
               setInput={setInput}
               stage={stage}
               submittedQuestion={submittedQuestion}
+              answerResult={answerResult}
+              answerError={answerError}
               goTo={goTo}
+              onRequestOfficialAnswer={() => void requestOfficialAnswer(input)}
+              onRetry={() => void requestOfficialAnswer(submittedQuestion)}
             />
           </section>
 
@@ -322,7 +441,13 @@ export default function Home() {
                     : "이어서 질문해보세요"
                 }
                 disabled={stage === "thinking" || stage === "official" || stage === "private-receipt" || stage === "decision"}
-                submitLabel={stage === "thinking" ? "확인 중" : "보내기"}
+                submitLabel={
+                  stage === "thinking"
+                    ? "확인 중"
+                    : stage === "no-evidence" || stage === "answer-error"
+                      ? "다시 확인"
+                      : "보내기"
+                }
                 onChange={setInput}
                 onSubmit={submit}
               />
@@ -341,13 +466,21 @@ function StageContent({
   input,
   setInput,
   submittedQuestion,
+  answerResult,
+  answerError,
   goTo,
+  onRequestOfficialAnswer,
+  onRetry,
 }: {
   stage: StageId;
   input: string;
   setInput: (value: string) => void;
   submittedQuestion: string;
+  answerResult: AnswerResult | null;
+  answerError: string | null;
   goTo: (stage: StageId) => void;
+  onRequestOfficialAnswer: () => void;
+  onRetry: () => void;
 }) {
   if (stage === "ask") {
     return (
@@ -369,7 +502,11 @@ function StageContent({
             </p>
           </div>
         </article>
-        <button className="btn-primary mt-7 h-12 px-6" onClick={() => goTo("thinking")}>
+        <button
+          className="btn-primary mt-7 h-12 px-6"
+          disabled={!input.trim()}
+          onClick={onRequestOfficialAnswer}
+        >
           공식 근거로 확인하기
         </button>
       </div>
@@ -380,22 +517,36 @@ function StageContent({
     return <LoadingMessage question={submittedQuestion} />;
   }
 
-  if (stage === "official") {
+  if (stage === "answer-error") {
+    return <AnswerError message={answerError} onRetry={onRetry} />;
+  }
+
+  if (stage === "no-evidence" && answerResult) {
+    return <NoEvidence answer={answerResult.data} />;
+  }
+
+  if (stage === "official" && answerResult) {
     return (
       <div className="max-w-[860px] animate-enter">
         <p className="text-xs font-bold text-[var(--status-official)]">학교 답변 · 공식 근거</p>
         <article className="mt-3 rounded-[18px] rounded-tl-md bg-[var(--surface-app)] p-6">
           <StatusPill tone="official">공식 답변</StatusPill>
-          <h2 className="mt-5 text-2xl font-bold leading-9">최대 22학점까지 신청할 수 있어요</h2>
+          <h2 className="mt-5 text-2xl font-bold leading-9">{answerResult.data.conclusion}</h2>
           <ChatMessage
             role="assistant"
-            content="전 학기 평점이 3.5 이상이고 군 복학 예정인 경우, 이번 학기 수강신청 상한은 22학점으로 안내할 수 있습니다. 다만 실제 KLAS 표시가 다르면 개인 학적 상태가 반영된 결과일 수 있어 담당 부서 확인이 필요합니다."
+            content={answerResult.data.explanation}
           />
-          <SourceList sources={sources} />
+          <VerifiedFacts facts={answerResult.data.verifiedFacts} />
+          <SourceList sources={answerResult.data.sources} />
+          {answerResult.warning ? (
+            <p className="mt-4 rounded-xl bg-white p-4 text-xs leading-5 text-[var(--text-secondary)]">
+              {answerResult.warning}
+            </p>
+          ) : null}
           <div className="mt-5 rounded-xl bg-white p-4">
             <p className="text-sm font-bold">대화 기록 CONV-0832</p>
             <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
-              근거 문서와 적용 조건을 함께 보관했어요.
+              {answerResult.data.nextAction}
             </p>
           </div>
           <p className="mt-5 text-sm leading-6 text-[var(--text-secondary)]">
@@ -614,6 +765,76 @@ function Landing({ onStart }: { onStart: () => void }) {
         </div>
       </section>
     </main>
+  );
+}
+
+function VerifiedFacts({ facts }: { facts: string[] }) {
+  if (facts.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="mt-5 rounded-xl bg-white p-4">
+      <h3 className="text-sm font-bold">확인된 적용 기준</h3>
+      <ul className="mt-3 space-y-2 text-sm leading-6 text-[var(--text-secondary)]">
+        {facts.map((fact) => (
+          <li className="flex gap-2" key={fact}>
+            <span aria-hidden="true" className="font-bold text-[var(--status-official)]">
+              ✓
+            </span>
+            <span>{fact}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function NoEvidence({ answer }: { answer: AnswerPayload }) {
+  return (
+    <article className="max-w-[820px] rounded-[18px] rounded-tl-md bg-[var(--surface-app)] p-6 animate-enter">
+      <StatusPill tone="idle">공식 근거 없음</StatusPill>
+      <h2 className="mt-5 text-2xl font-bold leading-9">{answer.conclusion}</h2>
+      <ChatMessage role="assistant" content={answer.explanation} />
+      <SourceList sources={answer.sources} />
+      {answer.unverifiedFacts.length > 0 ? (
+        <section className="mt-5 rounded-xl bg-white p-4">
+          <h3 className="text-sm font-bold">아직 확인되지 않은 내용</h3>
+          <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-[var(--text-secondary)]">
+            {answer.unverifiedFacts.map((fact) => (
+              <li key={fact}>{fact}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      <p className="mt-5 text-sm leading-6 text-[var(--text-secondary)]">
+        {answer.nextAction} 아래 입력창에서 질문을 수정해 다시 확인할 수 있어요.
+      </p>
+    </article>
+  );
+}
+
+function AnswerError({
+  message,
+  onRetry,
+}: {
+  message: string | null;
+  onRetry: () => void;
+}) {
+  return (
+    <article
+      className="max-w-[760px] rounded-[18px] rounded-tl-md bg-[var(--status-error-bg)] p-6 animate-enter"
+      role="alert"
+    >
+      <StatusPill tone="error">답변 확인 실패</StatusPill>
+      <h2 className="mt-5 text-2xl font-bold leading-9">질문은 그대로 보관했어요</h2>
+      <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
+        {message ?? "답변을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요."}
+      </p>
+      <button className="btn-primary mt-6 h-12 px-6" onClick={onRetry} type="button">
+        같은 질문으로 다시 시도
+      </button>
+    </article>
   );
 }
 

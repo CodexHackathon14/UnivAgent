@@ -1,16 +1,7 @@
-type ChatSource = {
-  id: string;
-  title: string;
-  url: string;
-  publishedAt: string | null;
-  department: string | null;
-  excerpt: string;
-  location?: string;
-  checkedAt: string;
-};
+import type { EvidenceSource } from "@/lib/univ-agent/types";
 
 type SourceListProps = {
-  sources: ChatSource[];
+  sources: EvidenceSource[];
 };
 
 function formatDate(value: string | null) {
@@ -52,7 +43,7 @@ export function SourceList({ sources }: SourceListProps) {
               </div>
               <a
                 className="text-xs font-bold text-[var(--action-primary)] underline-offset-4 hover:underline focus-visible:rounded focus-visible:outline-2 focus-visible:outline-[var(--action-primary)]"
-                href={source.url}
+                href={source.sourceUrl}
                 rel="noreferrer"
                 target="_blank"
               >
@@ -63,7 +54,7 @@ export function SourceList({ sources }: SourceListProps) {
               {source.excerpt}
             </blockquote>
             <p className="mt-3 text-xs text-[var(--text-secondary)]">
-              시스템 확인 시점: {new Date(source.checkedAt).toLocaleString("ko-KR")}
+              시스템 확인 시점: {new Date(source.verifiedAt).toLocaleString("ko-KR")}
             </p>
           </article>
         ))}

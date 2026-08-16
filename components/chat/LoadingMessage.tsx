@@ -4,7 +4,11 @@ type LoadingMessageProps = {
 
 export function LoadingMessage({ question }: LoadingMessageProps) {
   return (
-    <article className="max-w-[760px] rounded-[18px] rounded-tl-md bg-[var(--surface-app)] p-5">
+    <article
+      aria-busy="true"
+      aria-live="polite"
+      className="max-w-[760px] rounded-[18px] rounded-tl-md bg-[var(--surface-app)] p-5"
+    >
       <div className="flex items-start justify-between gap-5">
         <div className="flex gap-4">
           <span className="mt-2 size-2.5 rounded-full bg-[var(--action-primary)]" />

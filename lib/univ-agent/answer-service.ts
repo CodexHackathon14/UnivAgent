@@ -321,9 +321,7 @@ export async function generateAnswer(input: GenerateAnswerInput): Promise<Answer
     return buildRoutedAnswer(responsibility);
   }
 
-  const evidence = findOfficialEvidence(
-    `${input.question} ${input.conditions.join(" ")}`,
-  );
+  const evidence = findOfficialEvidence(input.question);
 
   if (evidence.length === 0) {
     return buildInsufficientEvidenceAnswer();
