@@ -2,7 +2,7 @@ import {
   isDemoAction,
   isDemoStage,
   transitionDemoCase,
-} from "@/lib/univ-agent/demo-case";
+} from "@/lib/school-life/demo-case";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

@@ -1,4 +1,4 @@
-import type { EvidenceSource } from "@/lib/univ-agent/types";
+import type { EvidenceSource } from "@/lib/school-life/types";
 
 type SourceListProps = {
   sources: EvidenceSource[];

@@ -1,4 +1,4 @@
-import { getDemoCase, isDemoStage } from "@/lib/univ-agent/demo-case";
+import { getDemoCase, isDemoStage } from "@/lib/school-life/demo-case";
 
 export async function GET(request: Request) {
   const requestedStage = new URL(request.url).searchParams.get("stage") ?? "home";

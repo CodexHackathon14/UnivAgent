@@ -1,4 +1,4 @@
-import { generateAnswer } from "@/lib/univ-agent/answer-service";
+import { generateAnswer } from "@/lib/school-life/answer-service";
 
 const JSON_HEADERS = {
   "Cache-Control": "no-store",

@@ -4,7 +4,7 @@ import {
   type DemoAction,
   type DemoCase,
   type DemoStage,
-} from "@/lib/univ-agent/demo-case";
+} from "@/lib/school-life/demo-case";
 
 export class DemoRequestError extends Error {}
 

@@ -1,4 +1,4 @@
-# Design
+# 학교생활 UI/UX 설계
 
 ## Source of Truth
 

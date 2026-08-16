@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "답잇다 | 광운대학교 행정 대화",
+  title: "학교생활 | 대학 행정 대화",
   description: "공식 답부터 개인 확인과 집단 사안까지 이어지는 대학 행정 데모",
 };
 

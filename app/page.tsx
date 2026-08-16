@@ -10,18 +10,18 @@ import {
   advanceDemoCase,
   DemoRequestError,
   loadDemoCase,
-} from "@/lib/univ-agent/demo-client";
+} from "@/lib/school-life/demo-client";
 import {
   DEMO_STAGES,
   type DemoAction,
   type DemoCase,
   type DemoStage,
-} from "@/lib/univ-agent/demo-case";
+} from "@/lib/school-life/demo-case";
 import type {
   AnswerPayload,
   AnswerResult,
   EvidenceSource,
-} from "@/lib/univ-agent/types";
+} from "@/lib/school-life/types";
 
 type StageId =
   | "ask"
@@ -54,7 +54,7 @@ const stageIds = [
   "final",
 ] as const satisfies readonly StageId[];
 
-const DEMO_SESSION_KEY = "univ-agent:demo-session:v1";
+const DEMO_SESSION_KEY = "school-life:demo-session:v1";
 
 interface DemoSessionSnapshot {
   version: 1;

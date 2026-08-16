@@ -1,10 +1,10 @@
-# UnivAgent(답잇다) Build Log
+# 학교생활 Build Log
 
-마지막 갱신: 2026-08-16 17:21 KST
+마지막 갱신: 2026-08-16 17:25 KST
 
 ## 1. 목표와 현재 범위
 
-UnivAgent는 학생의 질문을 광운대학교 공식 근거, 개인 확인, 집단 사안,
+학교생활은 학생의 질문을 광운대학교 공식 근거, 개인 확인, 집단 사안,
 학교 결정과 실행 기록으로 연결하는 대학 운영 SaaS 데모다.
 
 현재 해커톤 범위는 `docs/DESIGN.md`의 11개 화면을 따라 다음 흐름을
@@ -110,10 +110,10 @@ Home
   - `app/api/answers/route.ts`
   - `app/api/demo-case/route.ts`
   - `app/api/demo-case/transition/route.ts`
-  - `lib/univ-agent/answer-service.ts`
-  - `lib/univ-agent/demo-case.ts`
-  - `lib/univ-agent/evidence.ts`
-  - `lib/univ-agent/types.ts`
+  - `lib/school-life/answer-service.ts`
+  - `lib/school-life/demo-case.ts`
+  - `lib/school-life/evidence.ts`
+  - `lib/school-life/types.ts`
   - `.env.example`
 - 커밋: `9c1b8c8 feat: 근거 기반 답변과 데모 상태 API 추가`
 
@@ -176,3 +176,11 @@ Home
 - 데스크톱 브라우저에서 프로필의 좌측 하단 배치와 오류 오버레이가 없음을 확인했다.
 - `npm run lint`와 `npm run build -- --webpack`을 통과했다.
 - 커밋: `115a633 fix: 좌측 내비게이션에 합성 학생 프로필 표시`
+
+### 2026-08-16 17:25 - 프로젝트명 통일
+
+- 공식 프로젝트명을 `학교생활`로 통일하고 구 프로젝트명 표기를 제거했다.
+- 브라우저 메타데이터, 패키지명과 세션 키의 기술 식별자를 `school-life`로 변경했다.
+- 내부 모듈 경로를 `lib/school-life`로 변경하고 모든 import와 문서 경로를 정합화했다.
+- README, 제품 명세, UI/UX 설계, 커밋 규칙, 작업 지침과 Build Log의 제목 및 제품 정의를 일관되게 정리했다.
+- `npm run lint`와 `npm run build -- --webpack`을 통과했다.
