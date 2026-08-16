@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { LoadingMessage } from "@/components/chat/LoadingMessage";
@@ -11,10 +11,11 @@ import {
   DemoRequestError,
   loadDemoCase,
 } from "@/lib/univ-agent/demo-client";
-import type {
-  DemoAction,
-  DemoCase,
-  DemoStage,
+import {
+  DEMO_STAGES,
+  type DemoAction,
+  type DemoCase,
+  type DemoStage,
 } from "@/lib/univ-agent/demo-case";
 import type {
   AnswerPayload,
@@ -37,6 +38,34 @@ type StageId =
   | "final";
 
 type StageTone = "idle" | "checking" | "official" | "personal" | "collective";
+
+const stageIds = [
+  "ask",
+  "thinking",
+  "official",
+  "no-evidence",
+  "answer-error",
+  "private-prefill",
+  "private-verification",
+  "private-receipt",
+  "collective-prefill",
+  "collective-issue",
+  "decision",
+  "final",
+] as const satisfies readonly StageId[];
+
+const DEMO_SESSION_KEY = "univ-agent:demo-session:v1";
+
+interface DemoSessionSnapshot {
+  version: 1;
+  caseId: string;
+  demoStage: DemoStage;
+  uiStage: StageId;
+  input: string;
+  submittedQuestion: string;
+  answerResult: AnswerResult | null;
+  answerError: string | null;
+}
 
 const officialQuestion =
   "전 학기 3.5 이상인 군복학생인데 이번 학기 최대 몇 학점까지 신청할 수 있나요?";
@@ -129,6 +158,116 @@ function readApiError(value: unknown) {
   }
 
   return "답변 요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+}
+
+function readRequestError(error: unknown) {
+  if (error instanceof DemoRequestError) {
+    return error.message;
+  }
+
+  if (
+    error instanceof Error &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  ) {
+    return "데모 상태 확인 시간이 초과됐습니다. 잠시 후 다시 시도해 주세요.";
+  }
+
+  return "데모 서버와 연결할 수 없습니다. 연결 상태를 확인해 주세요.";
+}
+
+function isStageId(value: unknown): value is StageId {
+  return (
+    typeof value === "string" &&
+    stageIds.some((candidate) => candidate === value)
+  );
+}
+
+function isDemoStage(value: unknown): value is DemoStage {
+  return (
+    typeof value === "string" &&
+    DEMO_STAGES.some((candidate) => candidate === value)
+  );
+}
+
+function isRestorableStagePair(demoStage: DemoStage, uiStage: StageId) {
+  if (demoStage === "thinking") {
+    return ["thinking", "no-evidence", "answer-error"].includes(uiStage);
+  }
+
+  if (demoStage === "ask" && uiStage === "answer-error") {
+    return true;
+  }
+
+  return uiStageByDemoStage[demoStage] === uiStage;
+}
+
+function isDemoSessionSnapshot(value: unknown): value is DemoSessionSnapshot {
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    typeof value.caseId !== "string" ||
+    !isDemoStage(value.demoStage) ||
+    !isStageId(value.uiStage) ||
+    typeof value.input !== "string" ||
+    typeof value.submittedQuestion !== "string" ||
+    !(value.answerResult === null || isAnswerResult(value.answerResult)) ||
+    !(value.answerError === null || typeof value.answerError === "string") ||
+    !isRestorableStagePair(value.demoStage, value.uiStage)
+  ) {
+    return false;
+  }
+
+  if (
+    value.uiStage === "official" &&
+    (!value.answerResult ||
+      value.answerResult.data.status === "insufficient_evidence")
+  ) {
+    return false;
+  }
+
+  return !(
+    value.uiStage === "no-evidence" &&
+    (!value.answerResult ||
+      value.answerResult.data.status !== "insufficient_evidence")
+  );
+}
+
+function clearDemoSession() {
+  try {
+    window.sessionStorage.removeItem(DEMO_SESSION_KEY);
+  } catch {
+    return;
+  }
+}
+
+function readDemoSession() {
+  try {
+    const storedValue = window.sessionStorage.getItem(DEMO_SESSION_KEY);
+
+    if (!storedValue) {
+      return null;
+    }
+
+    const snapshot: unknown = JSON.parse(storedValue);
+
+    if (!isDemoSessionSnapshot(snapshot)) {
+      clearDemoSession();
+      return null;
+    }
+
+    return snapshot;
+  } catch {
+    clearDemoSession();
+    return null;
+  }
+}
+
+function writeDemoSession(snapshot: DemoSessionSnapshot) {
+  try {
+    window.sessionStorage.setItem(DEMO_SESSION_KEY, JSON.stringify(snapshot));
+  } catch {
+    return;
+  }
 }
 
 const stageOrder: StageId[] = [
@@ -301,6 +440,7 @@ const navItems = [
 ] as const;
 
 export default function Home() {
+  const [hasRestoredSession, setHasRestoredSession] = useState(false);
   const [started, setStarted] = useState(false);
   const [stage, setStage] = useState<StageId>("ask");
   const [input, setInput] = useState(officialQuestion);
@@ -332,6 +472,93 @@ export default function Home() {
     return base;
   }, [demoCase, stageIndex]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function restoreSession() {
+      const snapshot = readDemoSession();
+
+      if (!snapshot) {
+        await Promise.resolve();
+
+        if (!cancelled) {
+          setHasRestoredSession(true);
+        }
+        return;
+      }
+
+      try {
+        const restoredCase = await loadDemoCase(snapshot.demoStage);
+
+        if (cancelled) {
+          return;
+        }
+
+        if (restoredCase.caseId !== snapshot.caseId) {
+          clearDemoSession();
+          setTransitionError(
+            "이전 데모 기록이 현재 시나리오와 달라 새 세션으로 시작합니다.",
+          );
+          return;
+        }
+
+        const wasInterrupted = snapshot.uiStage === "thinking";
+
+        setDemoCase(restoredCase);
+        setStage(wasInterrupted ? "answer-error" : snapshot.uiStage);
+        setInput(snapshot.input);
+        setSubmittedQuestion(snapshot.submittedQuestion);
+        setAnswerResult(snapshot.answerResult);
+        setAnswerError(
+          wasInterrupted
+            ? "페이지가 새로고침되어 진행 중이던 확인이 중단됐습니다. 같은 질문으로 다시 시도해 주세요."
+            : snapshot.answerError,
+        );
+        setStarted(true);
+      } catch (error) {
+        if (!cancelled) {
+          setTransitionError(readRequestError(error));
+        }
+      } finally {
+        if (!cancelled) {
+          setHasRestoredSession(true);
+        }
+      }
+    }
+
+    void restoreSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasRestoredSession || !started || !demoCase) {
+      return;
+    }
+
+    writeDemoSession({
+      version: 1,
+      caseId: demoCase.caseId,
+      demoStage: demoCase.currentStage,
+      uiStage: stage,
+      input,
+      submittedQuestion,
+      answerResult,
+      answerError,
+    });
+  }, [
+    answerError,
+    answerResult,
+    demoCase,
+    hasRestoredSession,
+    input,
+    stage,
+    started,
+    submittedQuestion,
+  ]);
+
   function applyDemoCase(nextCase: DemoCase) {
     setDemoCase(nextCase);
     setStage(uiStageByDemoStage[nextCase.currentStage]);
@@ -343,21 +570,6 @@ export default function Home() {
     if (nextCase.currentStage === "collective_followup_prefill") {
       setInput(nextCase.followUps.collective);
     }
-  }
-
-  function readRequestError(error: unknown) {
-    if (error instanceof DemoRequestError) {
-      return error.message;
-    }
-
-    if (
-      error instanceof Error &&
-      (error.name === "TimeoutError" || error.name === "AbortError")
-    ) {
-      return "데모 상태 확인 시간이 초과됐습니다. 잠시 후 다시 시도해 주세요.";
-    }
-
-    return "데모 서버와 연결할 수 없습니다. 연결 상태를 확인해 주세요.";
   }
 
   async function startDemo() {
@@ -508,6 +720,10 @@ export default function Home() {
     }
   }
 
+  if (!hasRestoredSession) {
+    return <SessionRestoreLoading />;
+  }
+
   if (!started) {
     return (
       <Landing
@@ -594,6 +810,19 @@ export default function Home() {
         <ResponsibilityRail demoCase={demoCase} meta={meta} records={records} />
       </div>
     </div>
+  );
+}
+
+function SessionRestoreLoading() {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-[var(--surface-panel)] px-6 text-[var(--text-primary)]">
+      <div className="rounded-2xl border border-[var(--border-default)] bg-white px-8 py-7 text-center shadow-sm">
+        <p className="text-sm font-bold">데모 기록 확인 중</p>
+        <p className="mt-2 text-xs text-[var(--text-secondary)]">
+          이 탭에서 진행하던 단계를 불러오고 있어요.
+        </p>
+      </div>
+    </main>
   );
 }
 

@@ -120,8 +120,11 @@ async function readDemoResponse(response: Response) {
   return payload.data;
 }
 
-export async function loadDemoCase() {
-  const response = await fetch("/api/demo-case", {
+export async function loadDemoCase(stage?: DemoStage) {
+  const endpoint = stage
+    ? `/api/demo-case?stage=${encodeURIComponent(stage)}`
+    : "/api/demo-case";
+  const response = await fetch(endpoint, {
     cache: "no-store",
     signal: AbortSignal.timeout(10_000),
   });
