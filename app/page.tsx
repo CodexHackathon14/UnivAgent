@@ -737,7 +737,11 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-[var(--surface-panel)] text-[var(--text-primary)]">
       <div className="mx-auto flex min-h-screen w-full max-w-[1600px] flex-col overflow-hidden border-x border-[var(--border-default)] bg-[var(--surface-panel)] lg:h-screen lg:flex-row">
-        <SideNavigation active={meta.nav} status={meta.label} />
+        <SideNavigation
+          active={meta.nav}
+          status={meta.label}
+          student={demoCase?.student}
+        />
 
         <main className="relative flex min-h-[760px] flex-1 flex-col bg-[var(--surface-panel)] lg:h-screen">
           <header className="flex min-h-20 items-center justify-between border-b border-[var(--border-default)] px-6 sm:px-10">
@@ -1415,9 +1419,11 @@ function FinalTimetable({ demoCase }: { demoCase: DemoCase | null }) {
 function SideNavigation({
   active,
   status,
+  student,
 }: {
   active: (typeof navItems)[number][0];
   status: string;
+  student: DemoCase["student"] | undefined;
 }) {
   return (
     <aside className="flex border-b border-[var(--border-default)] bg-[var(--surface-app)] p-4 lg:h-screen lg:w-[248px] lg:shrink-0 lg:flex-col lg:border-b-0 lg:p-5">
@@ -1443,10 +1449,33 @@ function SideNavigation({
           </span>
         ))}
       </nav>
-      <div className="mt-auto hidden rounded-xl bg-[var(--surface-selected)] p-4 lg:block">
-        <p className="text-sm font-bold">22학점 시간표</p>
-        <p className="mt-1 text-xs text-[var(--text-secondary)]">수강신청 · 오늘</p>
-        <p className="mt-3 text-xs font-medium text-[var(--action-primary)]">{status}</p>
+      <div className="mt-auto hidden lg:block">
+        <div className="rounded-xl bg-[var(--surface-selected)] p-4">
+          <p className="text-sm font-bold">22학점 시간표</p>
+          <p className="mt-1 text-xs text-[var(--text-secondary)]">수강신청 · 오늘</p>
+          <p className="mt-3 text-xs font-medium text-[var(--action-primary)]">{status}</p>
+        </div>
+        {student ? (
+          <div className="mt-5 border-t border-[var(--border-default)] pt-5">
+            <div className="flex items-center gap-3 rounded-xl bg-white p-3">
+              <span
+                aria-hidden="true"
+                className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[var(--surface-selected)] text-sm font-bold text-[var(--action-primary)]"
+              >
+                {student.name.slice(0, 1)}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-bold">{student.name}</p>
+                <p className="mt-1 truncate text-[11px] text-[var(--text-secondary)]">
+                  {student.major} · {student.year}학년
+                </p>
+              </div>
+              <span className="size-2 shrink-0 rounded-full bg-[var(--status-official)]">
+                <span className="sr-only">합성 데모 학생 활성 상태</span>
+              </span>
+            </div>
+          </div>
+        ) : null}
       </div>
     </aside>
   );
